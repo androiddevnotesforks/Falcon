@@ -1,13 +1,32 @@
 import json
+import logging
 import os
 import re
+from logging.handlers import TimedRotatingFileHandler
 
 import pandas as pd
-from viper.customLogging import get_logger
 
 import params
 
-logger = get_logger("falcon", log_level=25, path=params.root_dir)
+_log_level = 25
+_log_format = "%(lineno)10d %(asctime)s %(process)d %(thread)d %(module)20s %(funcName)30s %(levelname)8s | %(message)s"
+_log_date_format = "%Y/%m/%d %H:%M:%S"
+
+logger = logging.getLogger("falcon")
+logger.setLevel(_log_level)
+
+_log_dir = os.path.join(params.root_dir, "logs")
+os.makedirs(_log_dir, exist_ok=True)
+
+_file_handler = TimedRotatingFileHandler(
+    filename=os.path.join(_log_dir, "falcon.log"),
+    when="midnight",
+    interval=1,
+    backupCount=30,
+)
+_file_handler.setFormatter(logging.Formatter(fmt=_log_format, datefmt=_log_date_format))
+_file_handler.setLevel(_log_level)
+logger.addHandler(_file_handler)
 
 
 def log(msg):
