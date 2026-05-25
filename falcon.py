@@ -124,12 +124,15 @@ def iterate_gmail_messages(falcon_client, get_query, num_days):
 
     mails = falcon_client.gmail.list_mails(query=get_query, max_pages=10000)
     for mail in mails:
-        mail_id = mail["id"]
+        try:
+            mail_id = mail["id"]
 
-        mail_full = falcon_client.gmail.get_mail(mail_id)
-        mail_processed = process_gmail_dic(mail_full)
+            mail_full = falcon_client.gmail.get_mail(mail_id)
+            mail_processed = process_gmail_dic(mail_full)
 
-        yield mail_id, mail_full, mail_processed
+            yield mail_id, mail_full, mail_processed
+        except Exception as e:
+            util.error(f"Error processing mail with id [{mail_id}]. Error: {str(e)}")
 
 
 class FalconClient:
