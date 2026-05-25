@@ -6,6 +6,7 @@ import yaml
 from llm import get_llm_client
 from llm.base import LLMClient
 import util
+from falcon import resolve_label_id
 from params import root_dir, config_dir
 
 
@@ -67,9 +68,13 @@ def evaluate_clause(clause, sender, subject, text, labels, tags, timediff, snipp
 
 
 def rule_labeller(
-    mail_processed, label_rules, label_id_to_name_mapping
-) -> tuple[list, list]:
-    """Apply rule-based label operations. Returns (add_label_names, remove_label_names)."""
+    mail_processed,
+    label_rules,
+    created_label_names,
+    label_id_to_name_mapping,
+    falcon_client,
+):
+    """Apply rule-based label operations directly to mail_processed["LabelIds"]."""
     curr_time = int(time.time())
 
     sender = mail_processed["Sender"]
@@ -79,9 +84,6 @@ def rule_labeller(
     timediff = curr_time - int(mail_processed["DateTime"].timestamp())
     labels = get_label_names(mail_processed, label_id_to_name_mapping)
     tags = compute_tags(mail_processed)
-
-    add_labels = []
-    remove_labels = []
 
     for q, label_out, args in label_rules:
         label_out = label_out.upper().strip()
@@ -94,15 +96,23 @@ def rule_labeller(
             if label_op_type == "+":
                 if label_name not in labels:
                     util.log(f"Add label [{label_name}] since [{q}] evaluates to True.")
+                    label_id = resolve_label_id(
+                        label_name,
+                        created_label_names,
+                        label_id_to_name_mapping,
+                        falcon_client,
+                    )
                     labels.add(label_name)
-                    add_labels.append(label_name)
+                    mail_processed["LabelIds"].add(label_id)
             elif label_op_type == "-":
                 if label_name in labels:
                     util.log(
                         f"Remove label [{label_name}] since [{q}] evaluates to True."
                     )
+                    label_id = created_label_names.get(label_name)
+                    if label_id:
+                        mail_processed["LabelIds"].discard(label_id)
                     labels.remove(label_name)
-                    remove_labels.append(label_name)
             else:
                 raise Exception(f"Invalid rule out [{label_out}].")
 
@@ -110,13 +120,12 @@ def rule_labeller(
                 util.log("Skipping processing other labelling rules.")
                 break
 
-    return add_labels, remove_labels
-
 
 # --- LLM labeller ---
 
 
-def _load_taxonomy(taxonomy_path: str) -> dict:
+def load_taxonomy(config: dict) -> dict:
+    taxonomy_path = config["labelling"]["taxonomy_file"]
     with open(os.path.join(root_dir, taxonomy_path), "r") as f:
         return yaml.safe_load(f)
 
@@ -247,7 +256,7 @@ def _classify_emails(
     max_retries = llm_config.get("max_retries", 3)
     retry_delay = float(llm_config.get("retry_delay", 2.0))
 
-    taxonomy = _load_taxonomy(labelling_config["taxonomy_file"])
+    taxonomy = load_taxonomy(config)
     taxonomy_str = _format_taxonomy_for_prompt(taxonomy)
 
     valid_labels = set(taxonomy["labels"].keys())
@@ -278,8 +287,8 @@ def _classify_emails(
     return all_labels
 
 
-def llm_labeller(mail_processed, config, label_id_to_name_mapping) -> tuple[list, list]:
-    """Run LLM classification and return (add_label_names, remove_label_names) for AI/* labels."""
+def llm_labeller(mail_processed, config, created_label_names, label_id_to_name_mapping):
+    """Run LLM classification and mutate mail_processed["LabelIds"] for AI/* labels."""
     batch_labels = _classify_emails([mail_processed], config)
     llm_labels, reason = batch_labels.get(mail_processed["Id"], ([], ""))
 
@@ -289,15 +298,15 @@ def llm_labeller(mail_processed, config, label_id_to_name_mapping) -> tuple[list
     current_labels = get_label_names(mail_processed, label_id_to_name_mapping)
     expected_ai_labels = {f"AI/{l}".upper() for l in llm_labels}
 
-    add_labels = []
-    remove_labels = []
-
     for existing in current_labels:
         if existing.startswith("AI/") and existing not in expected_ai_labels:
-            remove_labels.append(existing)
+            label_id = created_label_names.get(existing)
+            if label_id:
+                mail_processed["LabelIds"].discard(label_id)
 
-    for label_upper in expected_ai_labels:
-        if label_upper not in current_labels:
-            add_labels.append(label_upper)
+    for label_name in expected_ai_labels:
+        if label_name not in current_labels:
+            label_id = created_label_names[label_name]
+            mail_processed["LabelIds"].add(label_id)
 
-    return add_labels, remove_labels
+    print(f"LLM suggests: {expected_ai_labels} — {reason}")

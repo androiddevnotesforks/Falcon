@@ -85,6 +85,13 @@ def cleanup(email, main_query, num_days, key):
     created_label_names = {label["name"]: label["id"] for label in labels_info}
     created_label_ids = {label["id"]: label["name"] for label in labels_info}
 
+    taxonomy = labeller_mod.load_taxonomy(config)
+    for label_key in taxonomy["labels"]:
+        ai_label_name = f"AI/{label_key.upper()}"
+        actions.resolve_label_id(
+            ai_label_name, created_label_names, created_label_ids, falcon_client
+        )
+
     for mail_id, mail_full, mail_processed in iterate_gmail_messages(
         falcon_client, main_query, num_days
     ):
@@ -99,40 +106,36 @@ def cleanup(email, main_query, num_days, key):
         )
         util.log(existing_label_names)
 
+        original_label_ids = set(mail_processed["LabelIds"])
+
+        # Phase 1: LLM labelling — skipped for already-processed emails to save costs
         if should_relabel or (not already_processed):
-            # Phase 1: Rule-based labelling
-            add_labels, remove_labels = labeller_mod.rule_labeller(
-                mail_processed, label_rules, created_label_ids
+            labeller_mod.llm_labeller(
+                mail_processed, config, created_label_names, created_label_ids
             )
-
-            # Phase 2: LLM labelling
-            llm_adds, llm_removes = labeller_mod.llm_labeller(
-                mail_processed, config, created_label_ids
-            )
-            print(
-                f"LLM suggests adding labels: {llm_adds} and removing labels: {llm_removes}"
-            )
-            add_labels.extend(llm_adds)
-            remove_labels.extend(llm_removes)
-            if should_relabel:
-                remove_labels.append("RELABEL")
-
-            # Phase 3: Apply label changes to Gmail
-            actions.apply_label_changes(
-                falcon_client,
-                mail_id,
-                mail_processed,
-                add_labels,
-                remove_labels,
-                created_label_names,
-                created_label_ids,
-            )
-
+            state.mark_processed(email, mail_id)
             time.sleep(sleep_after_label)
 
-            state.mark_processed(email, mail_id)
+        # Phase 2: Rule-based labelling (always runs so new rules apply to old emails)
+        labeller_mod.rule_labeller(
+            mail_processed,
+            label_rules,
+            created_label_names,
+            created_label_ids,
+            falcon_client,
+        )
 
-        # Phase 4: Evaluate delete rules (after labels are applied)
+        if should_relabel:
+            relabel_id = created_label_names.get("RELABEL")
+            if relabel_id:
+                mail_processed["LabelIds"].discard(relabel_id)
+
+        # Phase 3: Apply label changes to Gmail (always runs)
+        actions.apply_label_changes(
+            falcon_client, mail_id, original_label_ids, mail_processed
+        )
+
+        # Phase 4: Evaluate delete rules (sees all labels including AI/*)
         if should_delete_email(
             mail_processed, blacklist_rules, whitelist_rules, created_label_ids
         ):
